@@ -1,6 +1,6 @@
 import sys
 import os
-sys.path.append('/kaggle/working/generalized-category-discovery')
+sys.path.append('/kaggle/input/gcd-files-new')
 
 # Setup
 from kaggle_setup import setup_directories, download_dino_weights
@@ -8,14 +8,23 @@ setup_directories()
 download_dino_weights()
 
 import torch
+from torch.utils.data import DataLoader
+from torch.optim import SGD, lr_scheduler
+import numpy as np
+from sklearn.cluster import KMeans
+
+# Import GCD modules
 from methods.contrastive_training.contrastive_training import *
 from data.get_datasets import get_class_splits
+from data.augmentations import get_transform
+from project_utils.general_utils import init_experiment
+from models import vision_transformer as vits
 
 def main():
-    # Simple arguments for Kaggle
+    # Kaggle-optimized arguments
     class Args:
         def __init__(self):
-            self.batch_size = 64  # Reduced for Kaggle GPU memory
+            self.batch_size = 32  # Reduced for Kaggle GPU memory
             self.num_workers = 2
             self.eval_funcs = ['v1', 'v2']
             self.dataset_name = 'scars'
@@ -25,7 +34,7 @@ def main():
             self.lr = 0.1
             self.momentum = 0.9
             self.weight_decay = 1e-4
-            self.epochs = 20  # Reduced for faster training
+            self.epochs = 10  # Reduced for faster training
             self.exp_root = '/kaggle/working/experiments'
             self.transform = 'imagenet'
             self.seed = 1
@@ -39,6 +48,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    # Set random seeds
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    
     args = get_class_splits(args)
     args.num_labeled_classes = len(args.train_classes)
     args.num_unlabeled_classes = len(args.unlabeled_classes)
@@ -49,7 +62,7 @@ def main():
     # Initialize experiment
     init_experiment(args, runner_name=['kaggle_gcd'])
     
-    # Load model
+    # Load DINO model
     if args.base_model == 'vit_dino':
         args.interpolation = 3
         args.crop_pct = 0.875
@@ -83,7 +96,12 @@ def main():
     train_dataset, test_dataset, unlabelled_train_examples_test, datasets = get_datasets(
         args.dataset_name, train_transform, test_transform, args)
     
-    # Create dataloaders
+    print(f"Dataset sizes:")
+    print(f"  Labeled train: {len(train_dataset.labelled_dataset)}")
+    print(f"  Unlabeled train: {len(train_dataset.unlabelled_dataset)}")
+    print(f"  Test: {len(test_dataset)}")
+    
+    # Create dataloaders with balanced sampling
     label_len = len(train_dataset.labelled_dataset)
     unlabelled_len = len(train_dataset.unlabelled_dataset)
     sample_weights = [1 if i < label_len else label_len / unlabelled_len for i in range(len(train_dataset))]
@@ -103,6 +121,8 @@ def main():
                                                out_dim=args.mlp_out_dim, 
                                                nlayers=args.num_mlp_layers)
     projection_head.to(device)
+    
+    print(f"Starting training for {args.epochs} epochs...")
     
     # Train
     train(projection_head, model, train_loader, test_loader_labelled, test_loader_unlabelled, args)
